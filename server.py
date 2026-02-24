@@ -1,25 +1,26 @@
 from flask import Flask
-import requests, threading, time, os
-import yfinance as yf
+import requests, threading, time, os, datetime
 
 app = Flask(__name__)
 
 # ══════════════════════════════════════════════════════════
 #  CREDENTIALS — set in Render Environment Variables
 # ══════════════════════════════════════════════════════════
-BOT_TOKEN    = os.environ.get("BOT_TOKEN",    "")
-CHAT_ID      = os.environ.get("CHAT_ID",      "")
-LEVEL_ZONE   = float(os.environ.get("LEVEL_ZONE",   "1.0"))  # $1.00 = 10 pips
-CANDLE_COUNT = int(os.environ.get("CANDLE_COUNT", "50"))     # last 50 x 1H candles
+BOT_TOKEN      = os.environ.get("BOT_TOKEN",      "")
+CHAT_ID        = os.environ.get("CHAT_ID",        "")
+TWELVE_API_KEY = os.environ.get("TWELVE_API_KEY", "")
+LEVEL_ZONE     = float(os.environ.get("LEVEL_ZONE",   "1.0"))  # $1.00 = 10 pips
+CANDLE_COUNT   = int(os.environ.get("CANDLE_COUNT", "50"))     # last 50 x 1H candles
 
 # ══════════════════════════════════════════════════════════
 #  URLS
 # ══════════════════════════════════════════════════════════
+TWELVE_URL     = "https://api.twelvedata.com/time_series"
 SWISSQUOTE_URL = "https://forex-data-feed.swissquote.com/public-quotes/bboquotes/instrument/XAU/USD"
 METALS_URL     = "https://api.metals.live/v1/spot/gold"
 
 # ══════════════════════════════════════════════════════════
-#  LEVEL TYPE EMOJIS
+#  LEVEL TYPE LABELS
 # ══════════════════════════════════════════════════════════
 LEVEL_EMOJI = {
     "A Level"     : "🔴 A Level     (Green → Red)",
@@ -30,12 +31,6 @@ LEVEL_EMOJI = {
 
 # ══════════════════════════════════════════════════════════
 #  LEVEL STORAGE
-#  Each level: {
-#    "price"  : float,
-#    "type"   : str,
-#    "fresh"  : bool,
-#    "alerted": bool
-#  }
 # ══════════════════════════════════════════════════════════
 key_levels  = []
 levels_lock = threading.Lock()
@@ -57,6 +52,23 @@ def send_telegram(message):
         print(f"Telegram error: {e}")
 
 # ══════════════════════════════════════════════════════════
+#  MARKET HOURS CHECK
+#  XAUUSD trades Mon 00:00 UTC – Fri 22:00 UTC
+#  Closed: Sat all day, Sun before 17:00 UTC
+# ══════════════════════════════════════════════════════════
+def is_market_open():
+    now     = datetime.datetime.utcnow()
+    weekday = now.weekday()  # Mon=0, Tue=1 ... Sat=5, Sun=6
+
+    if weekday == 5:                          # Saturday — fully closed
+        return False
+    if weekday == 6 and now.hour < 17:        # Sunday before 17:00 UTC
+        return False
+    if weekday == 4 and now.hour >= 22:       # Friday after 22:00 UTC
+        return False
+    return True
+
+# ══════════════════════════════════════════════════════════
 #  CANDLE HELPERS
 # ══════════════════════════════════════════════════════════
 def is_green(o, c): return c >= o
@@ -74,19 +86,56 @@ def detect_level_type(o1, c1, o2, c2):
     if c1r and c2r: return "Bearish Gap"
     return None
 
-# ══════════════════════════════════════════════════════════
-#  FRESH / UNFRESH LOGIC
-# ══════════════════════════════════════════════════════════
 def check_state_change(lvl_price, o, h, l, c, is_fresh):
     wick_touch = h >= lvl_price and l <= lvl_price
     body_break = min(o, c) < lvl_price and max(o, c) > lvl_price
     rejected   = wick_touch and not body_break
 
-    if is_fresh and rejected:
-        return False   # Fresh → Unfresh
-    if not is_fresh and body_break:
-        return True    # Unfresh → Fresh
-    return is_fresh    # no change
+    if is_fresh and rejected:  return False  # Fresh → Unfresh
+    if not is_fresh and body_break: return True   # Unfresh → Fresh
+    return is_fresh
+
+# ══════════════════════════════════════════════════════════
+#  FETCH 1H CANDLES — Twelve Data (replaces yfinance)
+# ══════════════════════════════════════════════════════════
+def fetch_candles():
+    """
+    Fetches last CANDLE_COUNT x 1H closed candles for XAU/USD
+    via Twelve Data API. Returns (opens, highs, lows, closes) lists
+    or (None, None, None, None) on failure.
+    """
+    try:
+        params = {
+            "symbol"    : "XAU/USD",
+            "interval"  : "1h",
+            "outputsize": CANDLE_COUNT + 1,  # +1 to exclude running candle
+            "apikey"    : TWELVE_API_KEY,
+            "format"    : "JSON",
+            "order"     : "ASC"              # oldest first
+        }
+        r    = requests.get(TWELVE_URL, params=params, timeout=15)
+        data = r.json()
+
+        if "values" not in data:
+            print(f"Twelve Data error: {data.get('message', 'Unknown error')}")
+            return None, None, None, None
+
+        values = data["values"]
+
+        # Exclude last entry (running/incomplete candle)
+        values = values[:-1]
+
+        opens  = [float(v["open"])  for v in values]
+        highs  = [float(v["high"])  for v in values]
+        lows   = [float(v["low"])   for v in values]
+        closes = [float(v["close"]) for v in values]
+
+        print(f"✅ Twelve Data: {len(closes)} candles fetched")
+        return opens, highs, lows, closes
+
+    except Exception as e:
+        print(f"Twelve Data fetch error: {e}")
+        return None, None, None, None
 
 # ══════════════════════════════════════════════════════════
 #  THREAD 1 — LEVEL DETECTION (every 15 mins)
@@ -101,23 +150,14 @@ def level_detector():
 
     while True:
         try:
-            print("🔄 Fetching 1H candles from yfinance...")
+            print("🔄 Fetching 1H candles from Twelve Data...")
 
-            ticker = yf.Ticker("GC=F")
-            df     = ticker.history(period="7d", interval="1h")
+            opens, highs, lows, closes = fetch_candles()
 
-            if df.empty:
-                print("⚠️ yfinance returned empty data, retrying in 15 mins...")
+            if opens is None:
+                print("⚠️ No candle data, retrying in 15 mins...")
                 time.sleep(900)
                 continue
-
-            # Exclude running candle (last row) — closed candles only
-            df = df.iloc[-(CANDLE_COUNT + 1):-1]
-
-            opens  = df["Open"].tolist()
-            highs  = df["High"].tolist()
-            lows   = df["Low"].tolist()
-            closes = df["Close"].tolist()
 
             new_levels = []
 
@@ -131,7 +171,7 @@ def level_detector():
 
                 lvl_price = round(c1, 2)
 
-                # Replay subsequent candles to get current Fresh/Unfresh state
+                # Replay subsequent candles to determine Fresh/Unfresh
                 is_fresh = True
                 for j in range(i + 1, len(opens)):
                     is_fresh = check_state_change(
@@ -166,7 +206,7 @@ def level_detector():
 
             print(f"✅ Levels updated: {new_count} total | {fresh_count} Fresh | {unfresh_count} Unfresh")
 
-            # Send Telegram only on first load
+            # Notify Telegram only on first successful load
             if old_count == 0 and new_count > 0:
                 send_telegram(
                     f"📊 <b>Key Levels Loaded</b>\n"
@@ -183,7 +223,7 @@ def level_detector():
         time.sleep(900)  # 15 minutes
 
 # ══════════════════════════════════════════════════════════
-#  LIVE PRICE — metals.live primary, Swissquote fallback
+#  LIVE PRICE — Swissquote primary, metals.live fallback
 # ══════════════════════════════════════════════════════════
 def get_live_price():
     # Primary: Swissquote
@@ -204,7 +244,6 @@ def get_live_price():
     try:
         r    = requests.get(METALS_URL, timeout=5)
         data = r.json()
-        # returns: [{"gold": 2650.42}]
         if isinstance(data, list) and len(data) > 0 and "gold" in data[0]:
             return round(float(data[0]["gold"]), 2)
     except Exception as e:
@@ -221,6 +260,12 @@ def price_monitor():
 
     while True:
         try:
+            # Skip when market is closed
+            if not is_market_open():
+                print("💤 Market closed — skipping price check")
+                time.sleep(60)
+                continue
+
             current_price = get_live_price()
 
             if current_price is None:
@@ -253,7 +298,6 @@ def price_monitor():
 
                     print(f"🚨 ALERT: {current_price} near {lvl_price} ({ltype})")
 
-                    # Mark alerted immediately to prevent spam
                     with levels_lock:
                         for stored in key_levels:
                             if abs(stored["price"] - lvl_price) < 0.01:
@@ -270,7 +314,7 @@ def price_monitor():
                         f"🏷️ Type    : {level_label}\n"
                         f"💰 Price   : {current_price}\n"
                         f"📏 Distance: ${distance:.2f}\n"
-                        f"⏰ Time    : {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                        f"⏰ Time    : {time.strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
                         f"━━━━━━━━━━━━━━━━━\n"
                         f"📝 Open TradingView to review."
                     )
@@ -318,11 +362,14 @@ def show_levels():
 #  START
 # ══════════════════════════════════════════════════════════
 if __name__ == "__main__":
+    # Thread 1 — level detection every 15 mins
     t1 = threading.Thread(target=level_detector, daemon=True)
     t1.start()
 
+    # Small delay so levels load before price monitor starts
     time.sleep(5)
 
+    # Thread 2 — real time price every 5 seconds
     t2 = threading.Thread(target=price_monitor, daemon=True)
     t2.start()
 
