@@ -23,10 +23,10 @@ METALS_URL     = "https://api.metals.live/v1/spot/gold"
 #  LEVEL TYPE LABELS
 # ══════════════════════════════════════════════════════════
 LEVEL_EMOJI = {
-    "A Level"     : "🔴 A Level     (Green → Red)",
-    "V Level"     : "🟢 V Level     (Red → Green)",
-    "Bullish Gap" : "🟢 Bullish Gap (Green → Green)",
-    "Bearish Gap" : "🔴 Bearish Gap (Red → Red)"
+    "A Level"     : "🔴 A Level     (Green -> Red)",
+    "V Level"     : "🟢 V Level     (Red -> Green)",
+    "Bullish Gap" : "🟢 Bullish Gap (Green -> Green)",
+    "Bearish Gap" : "🔴 Bearish Gap (Red -> Red)"
 }
 
 # ══════════════════════════════════════════════════════════
@@ -62,10 +62,20 @@ def is_market_open():
 
     if weekday == 5:                          # Saturday — fully closed
         return False
-    if weekday == 6 and now.hour < 17:        # Sunday before 17:00 UTC
+    if weekday == 6 and now.hour < 17:        # Sunday before 17:00 UTC (11:30 PM IST)
         return False
-    if weekday == 4 and now.hour >= 22:       # Friday after 22:00 UTC
+    if weekday == 4 and now.hour >= 22:       # Friday after 22:00 UTC (3:30 AM IST Sat)
         return False
+
+    # Weekday off-hours: 2AM–8AM IST = 20:30–02:30 UTC
+    # i.e. after 20:30 UTC OR before 02:30 UTC
+    utc_minutes = now.hour * 60 + now.minute
+    off_start   = 20 * 60 + 30   # 20:30 UTC = 2:00 AM IST
+    off_end     = 2  * 60 + 30   # 02:30 UTC = 8:00 AM IST
+
+    if utc_minutes >= off_start or utc_minutes < off_end:
+        return False
+
     return True
 
 # ══════════════════════════════════════════════════════════
@@ -309,14 +319,14 @@ def price_monitor():
                     send_telegram(
                         f"🚨 <b>KEY LEVEL ALERT!</b>\n"
                         f"━━━━━━━━━━━━━━━━━\n"
-                        f"📊 Symbol  : XAUUSD\n"
-                        f"📍 Level   : {lvl_price}\n"
-                        f"🏷️ Type    : {level_label}\n"
-                        f"💰 Price   : {current_price}\n"
-                        f"📏 Distance: ${distance:.2f}\n"
-                        f"⏰ Time    : {time.strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
+                        f"Symbol  : XAUUSD\n"
+                        f"Level   : {lvl_price}\n"
+                        f"Type    : {level_label}\n"
+                        f"Price   : {current_price}\n"
+                        f"Distance: ${distance:.2f}\n"
+                        f"Time    : {time.strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
                         f"━━━━━━━━━━━━━━━━━\n"
-                        f"📝 Open TradingView to review."
+                        f"Open TradingView to review."
                     )
 
                 # Reset alerted flag once price moves 3x zone away
