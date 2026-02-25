@@ -31,6 +31,8 @@ LEVEL_EMOJI = {
 
 # ══════════════════════════════════════════════════════════
 #  LEVEL STORAGE
+#  alerted = True means this level will NEVER alert again
+#            (permanent — no reset even if price revisits)
 # ══════════════════════════════════════════════════════════
 key_levels  = []
 levels_lock = threading.Lock()
@@ -53,22 +55,19 @@ def send_telegram(message):
 
 # ══════════════════════════════════════════════════════════
 #  MARKET HOURS CHECK
-#  XAUUSD trades Mon 00:00 UTC – Fri 22:00 UTC
-#  Closed: Sat all day, Sun before 17:00 UTC
 # ══════════════════════════════════════════════════════════
 def is_market_open():
     now     = datetime.datetime.utcnow()
-    weekday = now.weekday()  # Mon=0, Tue=1 ... Sat=5, Sun=6
+    weekday = now.weekday()  # Mon=0 ... Sat=5, Sun=6
 
-    if weekday == 5:                          # Saturday — fully closed
+    if weekday == 5:                     # Saturday — fully closed
         return False
-    if weekday == 6 and now.hour < 17:        # Sunday before 17:00 UTC (11:30 PM IST)
+    if weekday == 6 and now.hour < 17:   # Sunday before 17:00 UTC
         return False
-    if weekday == 4 and now.hour >= 22:       # Friday after 22:00 UTC (3:30 AM IST Sat)
+    if weekday == 4 and now.hour >= 22:  # Friday after 22:00 UTC
         return False
 
     # Weekday off-hours: 2AM–8AM IST = 20:30–02:30 UTC
-    # i.e. after 20:30 UTC OR before 02:30 UTC
     utc_minutes = now.hour * 60 + now.minute
     off_start   = 20 * 60 + 30   # 20:30 UTC = 2:00 AM IST
     off_end     = 2  * 60 + 30   # 02:30 UTC = 8:00 AM IST
@@ -101,27 +100,22 @@ def check_state_change(lvl_price, o, h, l, c, is_fresh):
     body_break = min(o, c) < lvl_price and max(o, c) > lvl_price
     rejected   = wick_touch and not body_break
 
-    if is_fresh and rejected:  return False  # Fresh → Unfresh
-    if not is_fresh and body_break: return True   # Unfresh → Fresh
+    if is_fresh and rejected:      return False  # Fresh → Unfresh
+    if not is_fresh and body_break: return True  # Unfresh → Fresh
     return is_fresh
 
 # ══════════════════════════════════════════════════════════
-#  FETCH 1H CANDLES — Twelve Data (replaces yfinance)
+#  FETCH 1H CANDLES — Twelve Data
 # ══════════════════════════════════════════════════════════
 def fetch_candles():
-    """
-    Fetches last CANDLE_COUNT x 1H closed candles for XAU/USD
-    via Twelve Data API. Returns (opens, highs, lows, closes) lists
-    or (None, None, None, None) on failure.
-    """
     try:
         params = {
             "symbol"    : "XAU/USD",
             "interval"  : "1h",
-            "outputsize": CANDLE_COUNT + 1,  # +1 to exclude running candle
+            "outputsize": CANDLE_COUNT + 1,
             "apikey"    : TWELVE_API_KEY,
             "format"    : "JSON",
-            "order"     : "ASC"              # oldest first
+            "order"     : "ASC"
         }
         r    = requests.get(TWELVE_URL, params=params, timeout=15)
         data = r.json()
@@ -130,10 +124,7 @@ def fetch_candles():
             print(f"Twelve Data error: {data.get('message', 'Unknown error')}")
             return None, None, None, None
 
-        values = data["values"]
-
-        # Exclude last entry (running/incomplete candle)
-        values = values[:-1]
+        values = data["values"][:-1]  # exclude running candle
 
         opens  = [float(v["open"])  for v in values]
         highs  = [float(v["high"])  for v in values]
@@ -148,13 +139,16 @@ def fetch_candles():
         return None, None, None, None
 
 # ══════════════════════════════════════════════════════════
-#  THREAD 1 — LEVEL DETECTION (every 15 mins)
+#  THREAD 1 — LEVEL DETECTION
+#  FIX 1: Runs every 5 minutes (was 15)
+#  FIX 1: Posts update to group every time levels refresh
+#  FIX 2: Preserves alerted=True permanently across refreshes
 # ══════════════════════════════════════════════════════════
 def level_detector():
     print("📊 Level detector started...")
     send_telegram(
         "🤖 <b>SnR Alert Bot is LIVE!</b>\n"
-        "📊 Detecting XAUUSD 1H key levels every 15 minutes...\n"
+        "📊 Detecting XAUUSD 1H key levels every 5 minutes...\n"
         "⚡ Monitoring real-time price every 5 seconds..."
     )
 
@@ -165,8 +159,8 @@ def level_detector():
             opens, highs, lows, closes = fetch_candles()
 
             if opens is None:
-                print("⚠️ No candle data, retrying in 15 mins...")
-                time.sleep(900)
+                print("⚠️ No candle data, retrying in 5 mins...")
+                time.sleep(300)
                 continue
 
             new_levels = []
@@ -181,7 +175,7 @@ def level_detector():
 
                 lvl_price = round(c1, 2)
 
-                # Replay subsequent candles to determine Fresh/Unfresh
+                # Replay subsequent candles → current Fresh/Unfresh state
                 is_fresh = True
                 for j in range(i + 1, len(opens)):
                     is_fresh = check_state_change(
@@ -190,7 +184,9 @@ def level_detector():
                         is_fresh
                     )
 
-                # Preserve alerted flag if level already exists
+                # FIX 2: Preserve alerted=True permanently
+                # Once a level has been alerted, it stays alerted forever
+                # even after a levels refresh — no second alert ever
                 existing_alerted = False
                 with levels_lock:
                     for existing in key_levels:
@@ -202,11 +198,10 @@ def level_detector():
                     "price"  : lvl_price,
                     "type"   : ltype,
                     "fresh"  : is_fresh,
-                    "alerted": existing_alerted
+                    "alerted": existing_alerted  # ← carries over permanently
                 })
 
             with levels_lock:
-                old_count = len(key_levels)
                 key_levels.clear()
                 key_levels.extend(new_levels)
                 new_count = len(key_levels)
@@ -216,21 +211,20 @@ def level_detector():
 
             print(f"✅ Levels updated: {new_count} total | {fresh_count} Fresh | {unfresh_count} Unfresh")
 
-            # Notify Telegram only on first successful load
-            if old_count == 0 and new_count > 0:
-                send_telegram(
-                    f"📊 <b>Key Levels Loaded</b>\n"
-                    f"━━━━━━━━━━━━━━━━━\n"
-                    f"🟢 Fresh   : {fresh_count}\n"
-                    f"🔴 Unfresh : {unfresh_count}\n"
-                    f"📊 Total   : {new_count}\n"
-                    f"━━━━━━━━━━━━━━━━━"
-                )
+            # FIX 1: Send update to group on EVERY refresh (not just first load)
+            send_telegram(
+                f"<b>Key Levels Updated</b>\n"
+                f"━━━━━━━━━━━━━━━━━\n"
+                f"Fresh   : {fresh_count}\n"
+                f"Unfresh : {unfresh_count}\n"
+                f"Total   : {new_count}\n"
+                f"━━━━━━━━━━━━━━━━━"
+            )
 
         except Exception as e:
             print(f"Level detector error: {e}")
 
-        time.sleep(900)  # 15 minutes
+        time.sleep(300)  # FIX 1: every 5 minutes
 
 # ══════════════════════════════════════════════════════════
 #  LIVE PRICE — Swissquote primary, metals.live fallback
@@ -263,10 +257,12 @@ def get_live_price():
 
 # ══════════════════════════════════════════════════════════
 #  THREAD 2 — REAL TIME PRICE MONITOR (every 5 seconds)
+#  FIX 3: Loop continues after match — catches ALL levels hit simultaneously
+#  FIX 4: Message shows only key level price, no confusion
+#  FIX 2: alerted flag NEVER resets — one alert per level, forever
 # ══════════════════════════════════════════════════════════
 def price_monitor():
     print("⚡ Real-time price monitor started...")
-    last_price = None
 
     while True:
         try:
@@ -283,19 +279,15 @@ def price_monitor():
                 continue
 
             fresh_count = sum(1 for l in key_levels if l["fresh"])
-            print(f"💰 Price: {current_price} | Fresh levels: {fresh_count}")
-
-            if last_price is None:
-                last_price = current_price
-                time.sleep(5)
-                continue
+            print(f"Price: {current_price} | Fresh levels: {fresh_count}")
 
             with levels_lock:
                 levels_copy = list(key_levels)
 
+            # FIX 3: Loop through ALL levels — don't break/return after first match
+            # This ensures simultaneous alerts fire for multiple levels at once
             for lvl in levels_copy:
 
-                # Fresh levels ONLY
                 if not lvl["fresh"]:
                     continue
 
@@ -303,11 +295,12 @@ def price_monitor():
                 ltype     = lvl["type"]
                 distance  = abs(current_price - lvl_price)
 
-                # Price within proximity zone → fire alert
+                # FIX 2: Only alert if NOT already alerted — permanently
                 if distance <= LEVEL_ZONE and not lvl["alerted"]:
 
                     print(f"🚨 ALERT: {current_price} near {lvl_price} ({ltype})")
 
+                    # Mark permanently alerted — will NEVER reset
                     with levels_lock:
                         for stored in key_levels:
                             if abs(stored["price"] - lvl_price) < 0.01:
@@ -316,29 +309,20 @@ def price_monitor():
 
                     level_label = LEVEL_EMOJI.get(ltype, ltype)
 
+                    # FIX 4: Clean message — key level price is the focus
                     send_telegram(
                         f"🚨 <b>KEY LEVEL ALERT!</b>\n"
                         f"━━━━━━━━━━━━━━━━━\n"
-                        f"Symbol  : XAUUSD\n"
-                        f"Level   : {lvl_price}\n"
-                        f"Type    : {level_label}\n"
-                        f"Price   : {current_price}\n"
-                        f"Distance: ${distance:.2f}\n"
-                        f"Time    : {time.strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
+                        f"Key Level : {lvl_price}\n"
+                        f"Type      : {level_label}\n"
+                        f"Time      : {time.strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
                         f"━━━━━━━━━━━━━━━━━\n"
                         f"Open TradingView to review."
                     )
 
-                # Reset alerted flag once price moves 3x zone away
-                elif distance > LEVEL_ZONE * 3 and lvl["alerted"]:
-                    with levels_lock:
-                        for stored in key_levels:
-                            if abs(stored["price"] - lvl_price) < 0.01:
-                                stored["alerted"] = False
-                                break
-                    print(f"🔄 Level {lvl_price} reset — will re-alert if price returns")
-
-            last_price = current_price
+                # FIX 2: ← NO reset block here anymore
+                # alerted stays True permanently — price can revisit 100 times,
+                # no second alert will ever fire for this level
 
         except Exception as e:
             print(f"Price monitor error: {e}")
@@ -372,14 +356,11 @@ def show_levels():
 #  START
 # ══════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    # Thread 1 — level detection every 15 mins
     t1 = threading.Thread(target=level_detector, daemon=True)
     t1.start()
 
-    # Small delay so levels load before price monitor starts
     time.sleep(5)
 
-    # Thread 2 — real time price every 5 seconds
     t2 = threading.Thread(target=price_monitor, daemon=True)
     t2.start()
 
