@@ -232,16 +232,6 @@ def level_detector():
 
             print(f"✅ Levels updated: {new_count} total | {fresh_count} Fresh | {unfresh_count} Unfresh")
 
-            # FIX 1: Send update to group on EVERY refresh (not just first load)
-            send_telegram(
-                f"<b>Key Levels Updated</b>\n"
-                f"━━━━━━━━━━━━━━━━━\n"
-                f"Fresh   : {fresh_count}\n"
-                f"Unfresh : {unfresh_count}\n"
-                f"Total   : {new_count}\n"
-                f"━━━━━━━━━━━━━━━━━"
-            )
-
         except Exception as e:
             print(f"Level detector error: {e}")
 
