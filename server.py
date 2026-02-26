@@ -1,5 +1,6 @@
 from flask import Flask
 import requests, threading, time, os, datetime
+from datetime import timezone
 
 app = Flask(__name__)
 
@@ -57,7 +58,7 @@ def send_telegram(message):
 #  MARKET HOURS CHECK
 # ══════════════════════════════════════════════════════════
 def is_market_open():
-    now     = datetime.datetime.utcnow()
+    now     = datetime.datetime.now(timezone.utc)
     weekday = now.weekday()  # Mon=0 ... Sat=5, Sun=6
 
     if weekday == 5:                     # Saturday — fully closed
@@ -112,7 +113,7 @@ def fetch_candles():
         params = {
             "symbol"    : "XAU/USD",
             "interval"  : "1h",
-            "outputsize": CANDLE_COUNT + 1,
+            "outputsize": CANDLE_COUNT + 20,  # fetch extra to cover weekend gaps
             "apikey"    : TWELVE_API_KEY,
             "format"    : "JSON",
             "order"     : "ASC"
@@ -126,12 +127,32 @@ def fetch_candles():
 
         values = data["values"][:-1]  # exclude running candle
 
-        opens  = [float(v["open"])  for v in values]
-        highs  = [float(v["high"])  for v in values]
-        lows   = [float(v["low"])   for v in values]
-        closes = [float(v["close"]) for v in values]
+        # Filter out weekend/off-hours candles to match TradingView
+        # TradingView only shows candles during market hours
+        # XAUUSD market: Mon 00:00 – Fri 22:00 UTC, skip Sat/Sun
+        filtered = []
+        for v in values:
+            # datetime format from Twelve Data: "2026-02-25 10:00:00"
+            dt      = datetime.datetime.strptime(v["datetime"], "%Y-%m-%d %H:%M:%S")
+            weekday = dt.weekday()  # Mon=0 ... Sat=5, Sun=6
 
-        print(f"✅ Twelve Data: {len(closes)} candles fetched")
+            if weekday == 5:   # Saturday — skip
+                continue
+            if weekday == 6:   # Sunday before 17:00 UTC — skip
+                if dt.hour < 17:
+                    continue
+
+            filtered.append(v)
+
+        # Keep only last CANDLE_COUNT candles after filtering
+        filtered = filtered[-CANDLE_COUNT:]
+
+        opens  = [float(v["open"])  for v in filtered]
+        highs  = [float(v["high"])  for v in filtered]
+        lows   = [float(v["low"])   for v in filtered]
+        closes = [float(v["close"]) for v in filtered]
+
+        print(f"✅ Twelve Data: {len(closes)} candles fetched (filtered)")
         return opens, highs, lows, closes
 
     except Exception as e:
