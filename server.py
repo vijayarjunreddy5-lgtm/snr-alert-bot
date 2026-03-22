@@ -158,16 +158,23 @@ def fetch_candles():
 
 # ══════════════════════════════════════════════════════════
 #  THREAD 1 — LEVEL DETECTION
-#  FIX 1: Runs every 5 minutes (was 15)
-#  FIX 1: Posts update to group every time levels refresh
-#  FIX 2: Preserves alerted=True permanently across refreshes
+#  Runs every LEVEL_INTERVAL seconds (configurable)
+#  Preserves alerted=True permanently across refreshes
 # ══════════════════════════════════════════════════════════
 def level_detector():
     print("📊 Level detector started...")
+    deployed_at = datetime.datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     send_telegram(
-        "🤖 <b>SnR Alert Bot is LIVE!</b>\n"
-        "📊 Detecting XAUUSD 1H key levels every 5 minutes...\n"
-        "⚡ Monitoring real-time price every 5 seconds..."
+        f"🤖 <b>SnR Alert Bot DEPLOYED</b>\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"Deployed  : {deployed_at} UTC\n"
+        f"Symbol    : XAUUSD\n"
+        f"Timeframe : 1H\n"
+        f"Trading   : {MARKET_START}:00 - {MARKET_END}:00 IST\n"
+        f"Levels    : Every {LEVEL_INTERVAL}s\n"
+        f"Price     : Every 5 seconds\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"Bot is now monitoring key levels..."
     )
 
     while True:
