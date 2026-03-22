@@ -12,6 +12,9 @@ CHAT_ID        = os.environ.get("CHAT_ID",        "")
 TWELVE_API_KEY = os.environ.get("TWELVE_API_KEY", "")
 LEVEL_ZONE     = float(os.environ.get("LEVEL_ZONE",   "1.0"))  # $1.00 = 10 pips
 CANDLE_COUNT   = int(os.environ.get("CANDLE_COUNT", "50"))     # last 50 x 1H candles
+MARKET_START   = int(os.environ.get("MARKET_START",    "11"))  # IST hour to start (24hr)
+MARKET_END     = int(os.environ.get("MARKET_END",      "21"))  # IST hour to stop  (24hr)
+LEVEL_INTERVAL = int(os.environ.get("LEVEL_INTERVAL",  "60"))  # level update interval in seconds
 
 # ══════════════════════════════════════════════════════════
 #  URLS
@@ -55,25 +58,19 @@ def send_telegram(message):
         print(f"Telegram error: {e}")
 
 # ══════════════════════════════════════════════════════════
-#  MARKET HOURS CHECK
+#  TRADING HOURS CHECK — IST based, configurable
+#  MARKET_START = hour in IST to start (e.g. 11 = 11:00 AM)
+#  MARKET_END   = hour in IST to stop  (e.g. 21 = 9:00 PM)
+#  IST = UTC + 5:30
 # ══════════════════════════════════════════════════════════
 def is_market_open():
-    now     = datetime.datetime.now(timezone.utc)
-    weekday = now.weekday()  # Mon=0 ... Sat=5, Sun=6
+    # Convert current UTC time to IST (UTC + 5:30)
+    utc_now  = datetime.datetime.now(timezone.utc)
+    ist_now  = utc_now + datetime.timedelta(hours=5, minutes=30)
+    ist_hour = ist_now.hour
 
-    if weekday == 5:                     # Saturday — fully closed
-        return False
-    if weekday == 6 and now.hour < 17:   # Sunday before 17:00 UTC
-        return False
-    if weekday == 4 and now.hour >= 22:  # Friday after 22:00 UTC
-        return False
-
-    # Weekday off-hours: 2AM–8AM IST = 20:30–02:30 UTC
-    utc_minutes = now.hour * 60 + now.minute
-    off_start   = 20 * 60 + 30   # 20:30 UTC = 2:00 AM IST
-    off_end     = 2  * 60 + 30   # 02:30 UTC = 8:00 AM IST
-
-    if utc_minutes >= off_start or utc_minutes < off_end:
+    # Within configured trading hours?
+    if ist_hour < MARKET_START or ist_hour >= MARKET_END:
         return False
 
     return True
@@ -180,8 +177,8 @@ def level_detector():
             opens, highs, lows, closes = fetch_candles()
 
             if opens is None:
-                print("⚠️ No candle data, retrying in 5 mins...")
-                time.sleep(300)
+                print(f"⚠️ No candle data, retrying in {LEVEL_INTERVAL}s...")
+                time.sleep(LEVEL_INTERVAL)
                 continue
 
             new_levels = []
@@ -232,10 +229,11 @@ def level_detector():
 
             print(f"✅ Levels updated: {new_count} total | {fresh_count} Fresh | {unfresh_count} Unfresh")
 
+
         except Exception as e:
             print(f"Level detector error: {e}")
 
-        time.sleep(300)  # FIX 1: every 5 minutes
+        time.sleep(LEVEL_INTERVAL)  # configurable via LEVEL_INTERVAL env var
 
 # ══════════════════════════════════════════════════════════
 #  LIVE PRICE — Swissquote primary, metals.live fallback
