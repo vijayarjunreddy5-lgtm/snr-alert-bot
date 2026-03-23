@@ -178,6 +178,12 @@ def level_detector():
     )
 
     while True:
+        # Skip everything if outside trading hours — no API calls wasted
+        if not is_market_open():
+            print("💤 Outside trading hours — level detector sleeping...")
+            time.sleep(60)
+            continue
+
         try:
             print("🔄 Fetching 1H candles from Twelve Data...")
 
